@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Bomber Online Fixed</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        * { box-sizing: border-box; touch-action: none; user-select: none; }
+        body { margin: 0; background: #000; color: #fff; font-family: sans-serif; overflow: hidden; display: flex; flex-direction: column; align-items: center; }
+        #hud { width: 100%; padding: 10px; display: flex; justify-content: space-around; background: #222; border-bottom: 2px solid #444; }
+        canvas { background: #2e7d32; border: 4px solid #333; max-width: 95vw; max-height: 55vh; image-rendering: pixelated; margin: 5px 0; }
+        .overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.9); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 100; text-align: center; }
+        .hidden { display: none; }
+        .btn { padding: 12px 30px; font-size: 1rem; background: #27ae60; color: white; border: none; border-radius: 5px; cursor: pointer; margin-top: 10px; width: 220px; }
+        #id-display { color: yellow; cursor: pointer; text-decoration: underline; font-weight: bold; margin: 5px; }
+        #controls { width: 100%; flex-grow: 1; display: flex; justify-content: space-around; align-items: center; background: #111; padding-bottom: 20px; }
+        .joystick { width: 100px; height: 100px; background: #222; border-radius: 50%; position: relative; border: 2px solid #444; }
+        .stick { width: 40px; height: 40px; background: #888; border-radius: 50%; position: absolute; top: 28px; left: 28px; }
+        #bomb-btn { width: 85px; height: 85px; background: #d32f2f; border-radius: 50%; font-size: 2rem; display: flex; align-items: center; justify-content: center; box-shadow: 0 6px #880e4f; }
+        .toast { position: fixed; top: 50px; background: #444; color: #fff; padding: 10px 20px; border-radius: 20px; z-index: 200; display: none; }
+    </style>
+</head>
+<body>
+
+<div id="toast" class="toast">コピーしました！</div>
+
+<div id="hud">
+    <div id="p-stat" style="color:#00d2ff">🔥1 💣1</div>
+    <div style="font-size: 12px;">ID: <span id="id-display">取得中...</span></div>
+</div>
+
+<canvas id="canvas"></canvas>
+
+<div id="menu" class="overlay">
+    <h2>BOMBER ONLINE</h2>
+    <p>あなたのID (タップしてコピー):</p>
+    <div id="my-id-text" style="color:yellow; font-size:1.5rem; margin-bottom:15px; cursor:pointer;">---</div>
+    <input type="text" id="target-id" placeholder="相手のIDを入力" style="padding:10px; border-radius:5px; border:none; margin-bottom:10px; width:220px;">
+    <button class="btn" onclick="connectToPeer()">相手に接続して開始</button>
+    <button class="btn" onclick="startSingle()" style="background:#555;">1人で練習</button>
+</div>
+
+<div id="result-screen" class="overlay hidden">
+    <h1 id="result-text">WINNER!</h1>
+    <button class="btn" onclick="location.reload()">タイトルに戻る</button>
+</div>
+
+<div id="controls">
+    <div class="joystick" id="joy-base"><div class="stick" id="joy-stick"></div></div>
+    <div id="bomb-btn">💣</div>
+</div>
+
+<script>
+const GRID = 40; const ROWS = 13; const COLS = 13;
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+canvas.width = COLS * GRID; canvas.height = ROWS * GRID;
+
+let map = [];
+let bombs = [];
+let explosions = [];
+let items = [];
+let gameActive = false;
+let myIndex = 0;
+
+const players = [
+    { x: 1, y: 1, color: '#00d2ff', fire: 1, limit: 1, alive: true, active: 0 },
+    { x: 11, y: 11, color: '#ff4d4d', fire: 1, limit: 1, alive: true, active: 0 },
+    { x: 11, y: 1, color: '#ffff00', fire: 1, limit: 1, alive: true, active: 0 },
+    { x: 1, y: 11, color: '#e040fb', fire: 1, limit: 1, alive: true, active: 0 }
+];
+
+// IDコピー機能
+function setupCopy(elementId) {
+    const el = document.getElementById(elementId);
+    el.onclick = () => {
+        const id = el.innerText;
+        if (id === "---" || id === "取得中...") return;
+        navigator.clipboard.writeText(id);
+        const toast = document.getElementById('toast');
+        toast.style.display = 'block';
+        setTimeout(() => toast.style.display = 'none', 2000);
+    };
+}
+setupCopy('id-display');
+setupCopy('my-id-text');
+
+// 衝突判定 (爆弾の当たり判定をなくしたシンプル版)
+function checkCollision(nx, ny) {
+    const r = 0.35;
+    const points = [{x: nx-r, y: ny-r}, {x: nx+r, y: ny-r}, {x: nx-r, y: ny+r}, {x: nx+r, y: ny+r}];
+    for (let p of points) {
+        let gx = Math.round(p.x), gy = Math.round(p.y);
+        if (map[gy][gx] === 1 || map[gy][gx] === 2) return true; // 壁とブロックのみ判定
+    }
+    return false;
+}
+
+function initMap() {
+    for (let r = 0; r < ROWS; r++) {
+        map[r] = [];
+        for (let c = 0; c < COLS; c++) {
+            // 外周と格子状の壁
+            if (r === 0 || r === ROWS-1 || c === 0 || c === COLS-1 || (r%2===0 && c%2===0)) {
+                map[r][c] = 1;
+            } else {
+                // 初期位置(四隅とその隣)を安全地帯にする判定
+                const isSafe = (
+                    (r <= 2 && c <= 2) || // 左上
+                    (r >= ROWS-3 && c >= COLS-3) || // 右下
+                    (r <= 2 && c >= COLS-3) || // 右上
+                    (r >= ROWS-3 && c <= 2)    // 左下
+                );
+                
+                if (!isSafe && Math.random() < 0.6) {
+                    map[r][c] = 2; // 壊せるブロック
+                } else {
+                    map[r][c] = 0;
+                }
+            }
+        }
+    }
+}
+
+// --- 以下、誘爆・爆発・描画・通信ロジック (統合版) ---
+
+function triggerChain(bx, by) {
+    const target = bombs.find(b => b.x === bx && b.y === by && !b.triggered);
+    if (target) { target.eta = Date.now(); target.triggered = true; }
+}
+
+function explode(idx) {
+    const b = bombs.splice(idx, 1)[0];
+    b.owner.active--;
+    const cells = [{x: b.x, y: b.y}];
+    [[0,1],[0,-1],[1,0],[-1,0]].forEach(d => {
+        for (let i = 1; i <= b.range; i++) {
+            let nx = b.x + d[0]*i, ny = b.y + d[1]*i;
+            if (map[ny][nx] === 1) break;
+            cells.push({x: nx, y: ny});
+            triggerChain(nx, ny);
+            if (map[ny][nx] === 2) {
+                map[ny][nx] = 0;
+                if (Math.random() < 0.3) items.push({x: nx, y: ny, type: Math.random() < 0.5 ? 'F' : 'B'});
+                break;
+            }
+        }
+    });
+    explosions.push({ cells, end: Date.now() + 400 });
+}
+
+let peer, conn;
+function initPeer() {
+    peer = new Peer();
+    peer.on('open', id => {
+        document.getElementById('id-display').innerText = id;
+        document.getElementById('my-id-text').innerText = id;
+    });
+    peer.on('connection', c => {
+        conn = c; myIndex = 0;
+        setupConn();
+        initMap(); 
+        if(conn.open) conn.send({type: 'map', data: map});
+        start();
+    });
+}
+
+function connectToPeer() {
+    const id = document.getElementById('target-id').value;
+    if(!id) return;
+    conn = peer.connect(id);
+    myIndex = 1;
+    setupConn();
+}
+
+function setupConn() {
+    conn.on('open', () => { document.getElementById('menu').classList.add('hidden'); start(); });
+    conn.on('data', data => {
+        if (data.type === 'map') map = data.data;
+        if (data.type === 'pos') { players[data.idx].x = data.x; players[data.idx].y = data.y; }
+        if (data.type === 'bomb') placeBomb(players[data.idx], data.bx, data.by);
+    });
+}
+
+function update() {
+    if (!gameActive) return;
+    const p = players[myIndex];
+    if (p.alive && input.dist > 5) {
+        let vx = Math.cos(input.angle) * 0.12 * (input.dist / 50);
+        let vy = Math.sin(input.angle) * 0.12 * (input.dist / 50);
+        if (!checkCollision(p.x + vx, p.y)) p.x += vx;
+        if (!checkCollision(p.x, p.y + vy)) p.y += vy;
+        
+        const gx = Math.round(p.x), gy = Math.round(p.y);
+        const itIdx = items.findIndex(it => it.x === gx && it.y === gy);
+        if (itIdx !== -1) {
+            const it = items.splice(itIdx, 1)[0];
+            if (it.type === 'F') p.fire++; else p.limit++;
+            updateStats();
+        }
+        if (conn && conn.open) conn.send({type: 'pos', idx: myIndex, x: p.x, y: p.y});
+    }
+
+    const now = Date.now();
+    for (let i = bombs.length - 1; i >= 0; i--) if (now > bombs[i].eta) explode(i);
+    explosions = explosions.filter(ex => {
+        ex.cells.forEach(c => {
+            players.forEach(pl => { if(pl.alive && Math.round(pl.x) === c.x && Math.round(pl.y) === c.y) pl.alive = false; });
+        });
+        return now < ex.end;
+    });
+
+    const aliveOnes = players.filter(pl => pl.alive);
+    if (aliveOnes.length <= 1) {
+        gameActive = false;
+        document.getElementById('result-screen').classList.remove('hidden');
+        document.getElementById('result-text').innerText = p.alive ? "WINNER!" : "GAME OVER";
+    }
+}
+
+function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+            if (map[r][c] === 1) { ctx.fillStyle = '#333'; ctx.fillRect(c*GRID, r*GRID, GRID, GRID); }
+            else if (map[r][c] === 2) { ctx.fillStyle = '#8B4513'; ctx.fillRect(c*GRID+1, r*GRID+1, GRID-2, GRID-2); }
+        }
+    }
+    items.forEach(it => {
+        ctx.fillStyle = it.type === 'F' ? 'yellow' : 'purple';
+        ctx.font = "bold 20px sans-serif"; ctx.fillText(it.type, it.x*GRID+12, it.y*GRID+28);
+    });
+    bombs.forEach(b => {
+        ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(b.x*GRID+GRID/2, b.y*GRID+GRID/2, 16, 0, Math.PI*2); ctx.fill();
+    });
+    ctx.fillStyle = 'rgba(255, 120, 0, 0.8)';
+    explosions.forEach(ex => ex.cells.forEach(c => ctx.fillRect(c.x*GRID, c.y*GRID, GRID, GRID)));
+    players.forEach(pl => {
+        if (!pl.alive) return;
+        ctx.fillStyle = pl.color; ctx.beginPath(); ctx.arc(pl.x*GRID+GRID/2, pl.y*GRID+GRID/2, 14, 0, Math.PI*2); ctx.fill();
+        ctx.strokeStyle = '#fff'; ctx.stroke();
+    });
+    if (gameActive) requestAnimationFrame(() => { update
